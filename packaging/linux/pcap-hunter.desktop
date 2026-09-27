@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=pcap-hunter
+GenericName=Analizar capturas de red
+Comment=Busca escaneos, ARP spoofing, túneles DNS, beaconing y contraseñas en claro en capturas de red
+Exec=pcaphunter-app %f
+Icon=pcap-hunter
+Terminal=false
+MimeType=application/vnd.tcpdump.pcap;application/x-pcapng;
+Categories=Network;Utility;
+Keywords=pcap;pcapng;red;tráfico;seguridad;wireshark;

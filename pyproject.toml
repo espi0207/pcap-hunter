@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcap-hunter"
+version = "1.0.0"
+description = "Analiza capturas de red (pcap y pcapng) y detecta escaneos, ARP spoofing, túneles DNS, beaconing y credenciales en claro"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "espi0207" }]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff==0.16.9"]
+
+[project.scripts]
+pcaphunter = "pcaphunter.__main__:main"
+
+[project.gui-scripts]
+pcaphunter-app = "pcaphunter.gui:main"
+
+[tool.setuptools]
+packages = ["pcaphunter"]
+
+[tool.setuptools.package-data]
+pcaphunter = ["icon.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
