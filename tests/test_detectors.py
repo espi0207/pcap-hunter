@@ -228,3 +228,9 @@ def test_wireshark_filter_quotes_are_escaped():
 
     finding = Finding(Severity.LOW, "dns_tunnel", "t", 0.0, 0.0, "d", "10.0.0.5", 'a"b.example')
     assert finding.wireshark.endswith('contains "a\\"b.example"')
+
+
+def test_beacon_reusing_the_same_source_port_is_still_found():
+    # Reusar el puerto de origen en conexiones separadas por minutos no es un reenvío.
+    beacon = [tcp(i * 180.0, "10.0.0.5", "198.51.100.77", 50000, 443, SYN) for i in range(8)]
+    assert "beaconing" in rules(beacon)
