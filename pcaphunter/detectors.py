@@ -321,6 +321,9 @@ def detect_dns_tunnel(packets: list[Packet], cfg: Config) -> list[Finding]:
     return findings
 
 
+SYN_RETRANSMIT_GAP = 40.0  # segundos
+
+
 def detect_beaconing(packets: list[Packet], cfg: Config) -> list[Finding]:
     """Conexiones al mismo destino a intervalos casi exactos.
 
@@ -330,11 +333,17 @@ def detect_beaconing(packets: list[Packet], cfg: Config) -> list[Finding]:
     intervalos y no si son exactamente iguales.
     """
     starts: dict[tuple, list[float]] = defaultdict(list)
-    seen: set[tuple] = set()
+    last_syn: dict[tuple, float] = {}
     for p in packets:
-        # Un SYN reenviado (mismo puerto de origen) es la misma conexión, no una llamada más.
-        if p.is_syn and (conn := (p.src, p.sport, p.dst, p.dport)) not in seen:
-            seen.add(conn)
+        if not p.is_syn:
+            continue
+        # Un SYN reenviado (mismo puerto de origen, segundos después) es la misma conexión,
+        # no una llamada más. Los reenvíos van a 1, 2, 4... hasta 32 s del anterior; un puerto
+        # que se vuelve a usar minutos más tarde sí es una conexión nueva.
+        conn = (p.src, p.sport, p.dst, p.dport)
+        retransmission = conn in last_syn and p.ts - last_syn[conn] <= SYN_RETRANSMIT_GAP
+        last_syn[conn] = p.ts
+        if not retransmission:
             starts[(p.src, p.dst, p.dport)].append(p.ts)
 
     findings = []
