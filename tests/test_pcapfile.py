@@ -81,3 +81,29 @@ def test_absurd_packet_length_is_rejected(tmp_path):
     path.write_bytes(header + struct.pack("<IIII", 0, 0, 0x7FFFFFFF, 0x7FFFFFFF))
     with pytest.raises(CaptureError):
         list(read_capture(path))
+
+
+def _block(kind: int, body: bytes) -> bytes:
+    body += b"\0" * (-len(body) % 4)
+    total = 12 + len(body)
+    return struct.pack("<II", kind, total) + body + struct.pack("<I", total)
+
+
+SHB = _block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1))
+
+
+@pytest.mark.parametrize(
+    "rest",
+    [
+        _block(1, b""),  # interfaz sin cuerpo
+        _block(1, struct.pack("<HHI", 1, 0, 65535) + struct.pack("<HH", 9, 1)),  # opción sin su valor
+        _block(1, struct.pack("<HHI", 1, 0, 65535)) + _block(6, b"\0" * 8),  # paquete EPB cortado
+        _block(1, struct.pack("<HHI", 1, 0, 65535)) + _block(3, b""),  # paquete simple vacío
+    ],
+)
+def test_malformed_pcapng_blocks_raise_capture_error(tmp_path, rest):
+    # Una captura manipulada no debe tumbar el programa con un error de Python.
+    path = tmp_path / "mal.pcapng"
+    path.write_bytes(SHB + rest)
+    with pytest.raises(CaptureError):
+        list(read_capture(path))

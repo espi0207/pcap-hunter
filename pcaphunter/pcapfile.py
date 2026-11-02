@@ -83,11 +83,17 @@ def _tsresol(options: bytes, endian: str) -> float:
         code, length = struct.unpack(endian + "HH", options[pos : pos + 4])
         if code == 0:
             break
+        if pos + 4 + length > len(options):
+            raise CaptureError("opción de interfaz pcapng cortada")
         if code == 9 and length >= 1:
             value = options[pos + 4]
             return 2.0 ** -(value & 0x7F) if value & 0x80 else 10.0**-value
         pos += 4 + length + (-length % 4)
     return 1e-6
+
+
+# Lo mínimo que tiene que ocupar cada bloque que se lee: interfaz, paquete simple y paquete EPB.
+MIN_BODY = {1: 8, 3: 4, 6: 20}
 
 
 def _read_pcapng(fh) -> Iterator[RawPacket]:
@@ -117,6 +123,8 @@ def _read_pcapng(fh) -> Iterator[RawPacket]:
         if len(body) < total - 8:
             return
         body = body[:-4]  # la longitud repetida del final
+        if len(body) < MIN_BODY.get(block_type, 0):
+            raise CaptureError(f"bloque pcapng de tipo {block_type} demasiado corto ({len(body)} bytes)")
 
         if block_type == 1:  # Interface Description Block
             linktype, _, snaplen = struct.unpack(endian + "HHI", body[:8])
