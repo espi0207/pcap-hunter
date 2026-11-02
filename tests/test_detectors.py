@@ -198,3 +198,33 @@ def test_icmpv6_ping_sweep():
         for i in range(15)
     ]
     assert "ping_sweep" in rules(pings)
+
+
+@pytest.mark.parametrize(
+    "finding_rule, src, dst, expected",
+    [
+        (
+            "port_scan",
+            "192.168.1.66",
+            "192.168.1.10",
+            "ip.addr==192.168.1.66 && ip.addr==192.168.1.10 && tcp.flags.syn==1",
+        ),
+        ("ping_sweep", "fe80::66", None, "ipv6.src==fe80::66 && (icmp.type==8 || icmpv6.type==128)"),
+        ("arp_spoofing", "192.168.1.1", None, "arp.src.proto_ipv4==192.168.1.1"),
+        ("dns_tunnel", "10.0.0.5", "evil.example", 'ip.src==10.0.0.5 && dns.qry.name contains "evil.example"'),
+        ("cleartext_credentials", "10.0.0.2", "10.0.0.1", "ip.addr==10.0.0.2 && ip.addr==10.0.0.1"),
+    ],
+)
+def test_each_finding_has_a_wireshark_filter(finding_rule, src, dst, expected):
+    from pcaphunter.detectors import Finding
+
+    finding = Finding(Severity.LOW, finding_rule, "t", 0.0, 0.0, "d", src, dst)
+    assert finding.wireshark == expected
+    assert finding.to_dict()["wireshark"] == expected
+
+
+def test_wireshark_filter_quotes_are_escaped():
+    from pcaphunter.detectors import Finding
+
+    finding = Finding(Severity.LOW, "dns_tunnel", "t", 0.0, 0.0, "d", "10.0.0.5", 'a"b.example')
+    assert finding.wireshark.endswith('contains "a\\"b.example"')

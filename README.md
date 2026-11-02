@@ -95,7 +95,11 @@ un archivo por DNS. Hay además tres contraseñas que viajan en claro (FTP, una 
 con autenticación Basic y un formulario). El script que la genera está en
 `samples/generate_sample.py`.
 
-Con `--format json` la salida sale en JSON. El programa acaba con código 1 si encuentra
+Cada hallazgo trae un filtro de Wireshark (`Wireshark: ip.addr==… && tcp.flags.syn==1`):
+se pega en la barra de filtros con la misma captura abierta y quedan a la vista solo
+los paquetes que lo han hecho saltar, para comprobarlo con tus propios ojos.
+
+Con `--format json` la salida sale en JSON (el filtro va en el campo `wireshark`). El programa acaba con código 1 si encuentra
 algo de prioridad alta.
 
 ### Con una captura tuya

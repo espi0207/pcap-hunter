@@ -236,6 +236,9 @@ class App:
                 meta.append(f"MITRE ATT&CK {finding.mitre}")
             self.detail.insert("end", " · ".join(meta) + "\n\n")
             self.detail.insert("end", finding.details)
+            if finding.wireshark:
+                # Para comprobarlo a mano: se pega en la barra de filtros de Wireshark.
+                self.detail.insert("end", f"\n\nFiltro de Wireshark: {finding.wireshark}")
         self.detail.configure(state="disabled")
 
     # Lo que hacen los botones
