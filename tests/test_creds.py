@@ -66,3 +66,24 @@ def test_smtp_auth_plain_and_login():
 def test_mask():
     assert mask("Verano2026!") == "V… (11 caracteres)"
     assert "Verano" not in mask("Verano2026!")
+
+
+def test_user_and_pass_in_the_same_segment():
+    # Muchos clientes mandan los dos comandos juntos; la contraseña no debe acabar en el usuario.
+    assert sniff(tcp(b"USER alice\r\nPASS supersecret\r\n", 21)) == [("FTP", "alice", "supersecret")]
+
+
+def test_password_never_leaks_into_the_user_field():
+    found = sniff(tcp(b"USER alice\r\nPASS supersecret\r\n", 110), tcp(b"PASS supersecret\r\n", 110))
+    assert all("supersecret" not in (user or "") for _, user, _ in found)
+
+
+def test_pop3_account_called_ftp_is_not_treated_as_anonymous():
+    # La excepción del FTP anónimo es solo para FTP.
+    assert sniff(tcp(b"USER ftp\r\n", 110), tcp(b"PASS secreto\r\n", 110)) == [("POP3", "ftp", "secreto")]
+
+
+def test_smtp_auth_plain_after_server_challenge():
+    blob = base64.b64encode(b"\0alice\0secreto").decode()
+    found = sniff(tcp(b"AUTH PLAIN\r\n", 587), tcp(f"{blob}\r\n".encode(), 587))
+    assert found == [("SMTP AUTH PLAIN", "alice", "secreto")]

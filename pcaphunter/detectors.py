@@ -16,7 +16,7 @@ from enum import IntEnum
 from itertools import pairwise
 
 from .creds import CredentialSniffer, mask
-from .decode import RST, SYN, Packet
+from .decode import ACK, RST, SYN, Packet
 
 
 class Severity(IntEnum):
@@ -42,6 +42,11 @@ class Finding:
     dst: str | None = None
     mitre: str | None = None
 
+    @property
+    def wireshark(self) -> str | None:
+        """Filtro de Wireshark que deja a la vista los paquetes de este hallazgo."""
+        return wireshark_filter(self.rule, self.src, self.dst)
+
     def to_dict(self) -> dict:
         return {
             "severity": self.severity.label,
@@ -53,7 +58,31 @@ class Finding:
             "last_seen": self.last_seen,
             "mitre": self.mitre,
             "details": self.details,
+            "wireshark": self.wireshark,
         }
+
+
+def _ip(field: str, address: str) -> str:
+    return f"{'ipv6' if ':' in address else 'ip'}.{field}=={address}"
+
+
+def wireshark_filter(rule: str, src: str | None, dst: str | None) -> str | None:
+    if not src:
+        return None
+    if rule == "arp_spoofing":
+        return f"arp.src.proto_ipv4=={src}"
+    if rule == "ping_sweep":
+        return f"{_ip('src', src)} && (icmp.type==8 || icmpv6.type==128)"
+    if rule == "network_sweep":
+        return f"{_ip('src', src)} && tcp.flags.syn==1 && tcp.flags.ack==0"
+    if rule == "dns_tunnel" and dst:
+        domain = dst.replace("\\", "\\\\").replace('"', '\\"')
+        return f'{_ip("src", src)} && dns.qry.name contains "{domain}"'
+    if dst and rule in ("port_scan", "beaconing"):
+        return f"{_ip('addr', src)} && {_ip('addr', dst)} && tcp.flags.syn==1"
+    if dst:
+        return f"{_ip('addr', src)} && {_ip('addr', dst)}"
+    return _ip("addr", src)
 
 
 @dataclass(frozen=True)
@@ -106,7 +135,11 @@ def detect_scans(packets: list[Packet], cfg: Config) -> list[Finding]:
     synacks = {(p.dst, p.dport, p.src, p.sport) for p in packets if p.is_synack}
     # Si el que escanea contesta al SYN-ACK con un ACK, completa la conexión (nmap -sT);
     # si contesta con RST, es un escaneo "medio abierto" (nmap -sS), más sigiloso.
-    acks = {(p.src, p.sport, p.dst, p.dport) for p in packets if p.proto == "TCP" and p.flags & (SYN | RST) == 0}
+    acks = {
+        (p.src, p.sport, p.dst, p.dport)
+        for p in packets
+        if p.proto == "TCP" and p.flags & ACK and not p.flags & (SYN | RST)  # un FIN suelto no completa nada
+    }
     findings = []
 
     by_pair: dict[tuple, list] = defaultdict(list)
@@ -164,7 +197,8 @@ def detect_scans(packets: list[Packet], cfg: Config) -> list[Finding]:
             )
         )
 
-    pings = [(p.ts, p.dst, p.src) for p in packets if p.proto == "ICMP" and p.icmp_type == 8]
+    # echo request: tipo 8 en ICMP y 128 en ICMPv6
+    pings = [(p.ts, p.dst, p.src) for p in packets if (p.proto, p.icmp_type) in (("ICMP", 8), ("ICMPv6", 128))]
     by_src: dict[str, list] = defaultdict(list)
     for ts, dst, src in pings:
         by_src[src].append((ts, dst))
@@ -202,9 +236,12 @@ def detect_arp_spoofing(packets: list[Packet], cfg: Config) -> list[Finding]:
         elif owner[ip] != mac:
             changes[(ip, owner[ip], mac)].append(p.ts)
 
+    ips_of: dict[str, list[str]] = defaultdict(list)  # MAC -> IPs (antes se recorrían todas por cada cambio)
+    for other, mac in owner.items():
+        ips_of[mac].append(other)
     findings = []
     for (ip, old, new), times in changes.items():
-        others = sorted(other for other, mac in owner.items() if mac == new and other != ip)
+        others = sorted(other for other in ips_of[new] if other != ip)
         if others:
             severity = Severity.HIGH
             detail = f"la MAC {new} es la de {', '.join(others)}: ese equipo se está haciendo pasar por {ip}"
@@ -284,6 +321,9 @@ def detect_dns_tunnel(packets: list[Packet], cfg: Config) -> list[Finding]:
     return findings
 
 
+SYN_RETRANSMIT_GAP = 40.0  # segundos
+
+
 def detect_beaconing(packets: list[Packet], cfg: Config) -> list[Finding]:
     """Conexiones al mismo destino a intervalos casi exactos.
 
@@ -293,8 +333,17 @@ def detect_beaconing(packets: list[Packet], cfg: Config) -> list[Finding]:
     intervalos y no si son exactamente iguales.
     """
     starts: dict[tuple, list[float]] = defaultdict(list)
+    last_syn: dict[tuple, float] = {}
     for p in packets:
-        if p.is_syn:
+        if not p.is_syn:
+            continue
+        # Un SYN reenviado (mismo puerto de origen, segundos después) es la misma conexión,
+        # no una llamada más. Los reenvíos van a 1, 2, 4... hasta 32 s del anterior; un puerto
+        # que se vuelve a usar minutos más tarde sí es una conexión nueva.
+        conn = (p.src, p.sport, p.dst, p.dport)
+        retransmission = conn in last_syn and p.ts - last_syn[conn] <= SYN_RETRANSMIT_GAP
+        last_syn[conn] = p.ts
+        if not retransmission:
             starts[(p.src, p.dst, p.dport)].append(p.ts)
 
     findings = []

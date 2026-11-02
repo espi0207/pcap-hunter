@@ -48,6 +48,8 @@ def to_text(analysis: Analysis, source: str) -> str:
         out.append(f"{tag}{paint(clean(f.title), 'bold')}")
         out.append(INDENT + paint(span + (f"  ({f.mitre})" if f.mitre else ""), "gray"))
         out.append(INDENT + clean(f.details))
+        if f.wireshark:
+            out.append(INDENT + paint(f"Wireshark: {clean(f.wireshark)}", "gray"))
         out.append("")
 
     talkers = ", ".join(f"{ip} ({_size(n)})" for ip, n in analysis.top_talkers())

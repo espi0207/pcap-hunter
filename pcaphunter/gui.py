@@ -54,6 +54,7 @@ class App:
         self.root = root
         self.analysis: Analysis | None = None
         self.source: Path | None = None
+        self.opening: Path | None = None  # la captura que se está abriendo ahora
         self.findings: dict[str, Finding] = {}
         self.jobs: queue.Queue = queue.Queue()
         self.busy = False
@@ -235,6 +236,9 @@ class App:
                 meta.append(f"MITRE ATT&CK {finding.mitre}")
             self.detail.insert("end", " · ".join(meta) + "\n\n")
             self.detail.insert("end", finding.details)
+            if finding.wireshark:
+                # Para comprobarlo a mano: se pega en la barra de filtros de Wireshark.
+                self.detail.insert("end", f"\n\nFiltro de Wireshark: {finding.wireshark}")
         self.detail.configure(state="disabled")
 
     # Lo que hacen los botones
@@ -254,9 +258,16 @@ class App:
         self.open(path, label="Ejemplo: 40 minutos en la red de una oficina (inventado)")
 
     def open(self, path: Path, label: str | None = None) -> None:
-        self.source = path
-        self.source_label.config(text=label or str(path))
-        self.in_background(lambda: analyze_capture(path), self.show_analysis, "Analizando…")
+        # El nombre y el análisis cambian juntos y solo si se ha podido leer: si falla, se
+        # queda la captura anterior (y el informe guardado sigue llevando su nombre).
+        self.opening = path
+
+        def opened(analysis: Analysis) -> None:
+            self.source = path
+            self.source_label.config(text=label or str(path))
+            self.show_analysis(analysis)
+
+        self.in_background(lambda: analyze_capture(path), opened, "Analizando…")
 
     def save(self) -> None:
         if not self.analysis or self.busy:
@@ -314,7 +325,7 @@ class App:
                         if isinstance(error, CaptureError)
                         else "no se ha podido abrir"
                     )
-                    messagebox.showerror("pcap-hunter", f"{self.source}: {kind}.\n\n{reason}", parent=self.root)
+                    messagebox.showerror("pcap-hunter", f"{self.opening}: {kind}.\n\n{reason}", parent=self.root)
                 else:
                     done(result)
         except queue.Empty:

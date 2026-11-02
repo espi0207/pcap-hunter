@@ -71,6 +71,7 @@ class CredentialSniffer:
     def __init__(self) -> None:
         self._pending_user: dict[tuple, str] = {}
         self._smtp_login: dict[tuple, list[str]] = {}
+        self._smtp_plain: set[tuple] = set()  # "AUTH PLAIN" sin datos: llegan en la línea siguiente
 
     def feed(self, pkt: Packet) -> list[Credential]:
         if pkt.proto != "TCP" or not pkt.payload:
@@ -79,22 +80,33 @@ class CredentialSniffer:
         if payload.startswith(HTTP_METHODS):
             return _http(payload)
         conn = (pkt.src, pkt.sport, pkt.dst, pkt.dport)
-        text = payload.decode("latin-1").strip()
+        # Un segmento puede llevar varios comandos ("USER ana\r\nPASS secreto\r\n"): uno a uno.
+        found = []
+        for line in payload.decode("latin-1").splitlines():
+            if line := line.strip():
+                found += self._line(conn, pkt.dport, line)
+        return found
+
+    def _line(self, conn: tuple, dport: int | None, text: str) -> list[Credential]:
         command, _, arg = text.partition(" ")
         command = command.upper()
 
-        if pkt.dport in (21, 110):  # FTP y POP3
-            protocol = "FTP" if pkt.dport == 21 else "POP3"
+        if dport in (21, 110):  # FTP y POP3
+            protocol = "FTP" if dport == 21 else "POP3"
             if command == "USER":
                 self._pending_user[conn] = arg
             elif command == "PASS":
                 user = self._pending_user.pop(conn, None)
-                if (user or "").lower() not in ("anonymous", "ftp"):  # el FTP anónimo no tiene secreto
+                # el FTP anónimo no tiene secreto (en POP3 "ftp" es una cuenta como otra)
+                if protocol != "FTP" or (user or "").lower() not in ("anonymous", "ftp"):
                     return [Credential(protocol, user, arg)]
-        elif pkt.dport == 143:  # IMAP: "a1 LOGIN usuario contraseña"
+        elif dport == 143:  # IMAP: "a1 LOGIN usuario contraseña"
             if m := IMAP_LOGIN.match(text):
                 return [Credential("IMAP", m.group(1).strip('"'), m.group(2).strip('"'))]
-        elif pkt.dport in (25, 587):  # SMTP
+        elif dport in (25, 587):  # SMTP
+            if conn in self._smtp_plain:
+                self._smtp_plain.discard(conn)
+                return _smtp_plain(text)
             if conn in self._smtp_login:
                 self._smtp_login[conn].append(_b64(text) or text)
                 if len(self._smtp_login[conn]) == 2:
@@ -102,15 +114,21 @@ class CredentialSniffer:
                     return [Credential("SMTP AUTH LOGIN", user, password)]
             elif command == "AUTH":
                 mechanism, _, initial = arg.partition(" ")
-                if mechanism.upper() == "PLAIN" and (decoded := _b64(initial)):
-                    # PLAIN: base64 de "\0usuario\0contraseña" (RFC 4616)
-                    parts = decoded.split("\0")
-                    if len(parts) == 3:
-                        return [Credential("SMTP AUTH PLAIN", parts[1], parts[2])]
+                if mechanism.upper() == "PLAIN":
+                    if initial and initial != "=":
+                        return _smtp_plain(initial)
+                    self._smtp_plain.add(conn)  # el cliente espera el "334" y lo manda después
                 elif mechanism.upper() == "LOGIN":
                     # El usuario puede venir ya en el mismo comando ("AUTH LOGIN dXN1YXJpbw==").
                     self._smtp_login[conn] = [_b64(initial) or initial] if initial else []
         return []
+
+
+def _smtp_plain(blob: str) -> list[Credential]:
+    # PLAIN: base64 de "\0usuario\0contraseña" (RFC 4616)
+    decoded = _b64(blob)
+    parts = decoded.split("\0") if decoded else []
+    return [Credential("SMTP AUTH PLAIN", parts[1], parts[2])] if len(parts) == 3 else []
 
 
 def mask(secret: str) -> str:
