@@ -174,3 +174,27 @@ def test_same_credentials_twice_is_one_finding():
     [finding] = run_detectors(packets)
     assert finding.rule == "cleartext_credentials" and finding.last_seen == 10
     assert "clave123" not in finding.details
+
+
+def test_fin_without_ack_is_not_a_completed_handshake():
+    from pcaphunter.decode import FIN
+
+    packets = syn_scan(range(1, 16))
+    packets.append(tcp(0.0005, SERVER, ATTACKER, 3, 40002, SYN | ACK))
+    packets.append(tcp(0.0008, ATTACKER, SERVER, 40002, 3, FIN))  # sin ACK: no completa nada
+    [finding] = [f for f in run_detectors(sorted(packets, key=lambda p: p.ts)) if f.rule == "port_scan"]
+    assert "nmap -sT" not in finding.details
+
+
+def test_beacon_still_found_with_a_syn_retransmission():
+    beacon = [tcp(i * 60.0, "10.0.0.5", "198.51.100.77", 50000 + i, 443, SYN) for i in range(6)]
+    beacon.append(tcp(1.0, "10.0.0.5", "198.51.100.77", 50000, 443, SYN))  # el mismo SYN, reenviado
+    assert "beaconing" in rules(beacon)
+
+
+def test_icmpv6_ping_sweep():
+    pings = [
+        Packet(ts=i * 0.1, length=64, src="fe80::66", dst=f"fe80::{i + 1:x}", proto="ICMPv6", icmp_type=128)
+        for i in range(15)
+    ]
+    assert "ping_sweep" in rules(pings)

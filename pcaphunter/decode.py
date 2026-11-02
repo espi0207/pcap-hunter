@@ -184,8 +184,9 @@ def _transport(pkt: Packet, proto: int, data: bytes) -> None:
     elif proto == PROTO_UDP:
         _need(data, 8, "UDP")
         pkt.proto = "UDP"
-        pkt.sport, pkt.dport = struct.unpack("!HH", data[:4])
-        pkt.payload = data[8:]
+        pkt.sport, pkt.dport, length = struct.unpack("!HHH", data[:6])
+        # Lo que va detrás de la longitud UDP no es del datagrama (0 = jumbograma de IPv6).
+        pkt.payload = data[8:length] if 8 <= length <= len(data) else data[8:]
         if 53 in (pkt.sport, pkt.dport):
             try:
                 pkt.dns = parse_dns(pkt.payload)

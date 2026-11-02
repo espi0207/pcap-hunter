@@ -107,3 +107,19 @@ def test_checksums_are_valid():
     # El checksum de una cabecera IPv4 correcta, sumado otra vez, da 0.
     packet = craft.ipv4("192.168.1.2", "10.0.0.1", 6, b"")
     assert craft.checksum(packet[:20]) == 0
+
+
+def test_udp_payload_stops_at_the_udp_length():
+    # Bytes detrás del datagrama (relleno o algo metido a mano) no son DNS.
+    import struct
+
+    from pcaphunter import craft
+    from pcaphunter.decode import decode
+
+    query = craft.dns_query(1, "example.com")
+    header = struct.pack("!HHHH", 5353, 53, 8, 0)  # longitud UDP 8: sin datos
+    frame = craft.ethernet(
+        "aa:aa:aa:aa:aa:aa", "bb:bb:bb:bb:bb:bb", 0x0800, craft.ipv4("10.0.0.2", "10.0.0.1", 17, header + query)
+    )
+    pkt = decode(0.0, 1, frame, len(frame))
+    assert pkt.payload == b"" and pkt.dns is None
