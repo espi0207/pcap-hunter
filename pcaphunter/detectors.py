@@ -42,6 +42,11 @@ class Finding:
     dst: str | None = None
     mitre: str | None = None
 
+    @property
+    def wireshark(self) -> str | None:
+        """Filtro de Wireshark que deja a la vista los paquetes de este hallazgo."""
+        return wireshark_filter(self.rule, self.src, self.dst)
+
     def to_dict(self) -> dict:
         return {
             "severity": self.severity.label,
@@ -53,7 +58,31 @@ class Finding:
             "last_seen": self.last_seen,
             "mitre": self.mitre,
             "details": self.details,
+            "wireshark": self.wireshark,
         }
+
+
+def _ip(field: str, address: str) -> str:
+    return f"{'ipv6' if ':' in address else 'ip'}.{field}=={address}"
+
+
+def wireshark_filter(rule: str, src: str | None, dst: str | None) -> str | None:
+    if not src:
+        return None
+    if rule == "arp_spoofing":
+        return f"arp.src.proto_ipv4=={src}"
+    if rule == "ping_sweep":
+        return f"{_ip('src', src)} && (icmp.type==8 || icmpv6.type==128)"
+    if rule == "network_sweep":
+        return f"{_ip('src', src)} && tcp.flags.syn==1 && tcp.flags.ack==0"
+    if rule == "dns_tunnel" and dst:
+        domain = dst.replace("\\", "\\\\").replace('"', '\\"')
+        return f'{_ip("src", src)} && dns.qry.name contains "{domain}"'
+    if dst and rule in ("port_scan", "beaconing"):
+        return f"{_ip('addr', src)} && {_ip('addr', dst)} && tcp.flags.syn==1"
+    if dst:
+        return f"{_ip('addr', src)} && {_ip('addr', dst)}"
+    return _ip("addr", src)
 
 
 @dataclass(frozen=True)
