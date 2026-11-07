@@ -13,8 +13,8 @@ import random
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .craft import BROADCAST, Lan, dns_answer, dns_query
-from .decode import ACK, RST, SYN
+from .craft import BROADCAST, Lan, dhcp_offer, dns_answer, dns_nxdomain, dns_query, ethernet, ipv4, snmp_get, udp
+from .decode import ACK, ETH_IPV4, PROTO_UDP, RST, SYN
 from .pcapfile import write_pcap
 
 ROUTER, SERVER, INTRANET = "192.168.1.1", "192.168.1.10", "192.168.1.5"
@@ -130,6 +130,37 @@ def write_sample(out: Path | str) -> int:
         dport = next(port)
         frames.append((t, lan.udp(INFECTED, ROUTER, dport, 53, dns_query(ident, name, qtype=16))))
         t += rng.uniform(0.2, 0.8)
+
+    # 7) Fuerza bruta contra el SSH del servidor: una conexión nueva cada segundo y pico.
+    t = t0 + 900
+    for _ in range(25):
+        frames.extend(lan.handshake(t, ATTACKER, SERVER, next(port), 22, b"SSH-2.0-libssh_0.9.6\r\n"))
+        t += rng.uniform(1.0, 2.0)
+
+    # 8) DHCP falso: llega un portátil nuevo y le contestan dos servidores. El del atacante
+    #    se pone a sí mismo como puerta de enlace y como DNS.
+    t = t0 + 1100
+    laptop = "3c:52:82:00:00:77"
+    for server, server_mac, delay in ((ROUTER, MACS[ROUTER], 0.004), (ATTACKER, MACS[ATTACKER], 0.002)):
+        offer = dhcp_offer(0x5EED, laptop, "192.168.1.77", server, server, server)
+        packet = ipv4(server, "255.255.255.255", PROTO_UDP, udp(server, "255.255.255.255", 67, 68, offer))
+        frames.append((t + delay, ethernet(server_mac, BROADCAST, ETH_IPV4, packet)))
+
+    # 9) Sesión en el 4444 (Metasploit): el equipo infectado abre una shell inversa.
+    t = t0 + 1300
+    frames.extend(lan.handshake(t, INFECTED, "203.0.113.66", next(port), 4444, rng.randbytes(64), rng.randbytes(900)))
+
+    # 10) DGA: el equipo infectado busca su servidor de control probando dominios al azar.
+    t = t0 + 1700
+    for _ in range(14):
+        name = "".join(rng.choices("abcdefghijklmnopqrstuvwxyz", k=rng.randint(10, 16))) + ".example"
+        ident, dport = rng.randint(0, 0xFFFF), next(port)
+        frames.append((t, lan.udp(INFECTED, ROUTER, dport, 53, dns_query(ident, name))))
+        frames.append((t + 0.02, lan.udp(ROUTER, INFECTED, 53, dport, dns_nxdomain(ident, name))))
+        t += rng.uniform(0.5, 3)
+
+    # 11) Un programa de monitorización pregunta a la intranet por SNMP v2c con su comunidad.
+    frames.append((t0 + 1900, lan.udp(OTHER, INTRANET, next(port), 161, snmp_get("intranet-rw"))))
 
     frames.sort(key=lambda f: f[0])
     write_pcap(out, frames)

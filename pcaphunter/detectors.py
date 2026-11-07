@@ -3,7 +3,9 @@
 Cada uno busca un patrón concreto, el mismo que buscaría alguien mirando la captura en
 Wireshark: muchos puertos distintos en poco tiempo (escaneo), una IP que cambia de MAC
 (ARP spoofing), subdominios larguísimos y aleatorios (túnel DNS), conexiones a
-intervalos demasiado regulares (beaconing) y contraseñas que viajan en claro.
+intervalos demasiado regulares (beaconing), contraseñas que viajan en claro, ráfagas de
+conexiones a SSH o RDP (fuerza bruta), sesiones en puertos típicos de malware, muchos
+dominios que no existen (DGA), dos servidores DHCP (uno falso) y pings que llevan datos.
 """
 
 from __future__ import annotations
@@ -41,11 +43,12 @@ class Finding:
     src: str | None = None
     dst: str | None = None
     mitre: str | None = None
+    port: int | None = None  # el puerto del servicio, cuando el hallazgo va de uno concreto
 
     @property
     def wireshark(self) -> str | None:
         """Filtro de Wireshark que deja a la vista los paquetes de este hallazgo."""
-        return wireshark_filter(self.rule, self.src, self.dst)
+        return wireshark_filter(self.rule, self.src, self.dst, self.port)
 
     def to_dict(self) -> dict:
         return {
@@ -66,9 +69,17 @@ def _ip(field: str, address: str) -> str:
     return f"{'ipv6' if ':' in address else 'ip'}.{field}=={address}"
 
 
-def wireshark_filter(rule: str, src: str | None, dst: str | None) -> str | None:
+def wireshark_filter(rule: str, src: str | None, dst: str | None, port: int | None = None) -> str | None:
+    if rule == "rogue_dhcp":
+        return "udp.srcport==67"
     if not src:
         return None
+    if rule == "dga":
+        return f"{_ip('dst', src)} && dns.flags.rcode==3"
+    if rule == "icmp_tunnel" and dst:
+        return f"{_ip('addr', src)} && {_ip('addr', dst)} && (icmp || icmpv6)"
+    if dst and port is not None:
+        return f"{_ip('addr', src)} && {_ip('addr', dst)} && tcp.port=={port}"
     if rule == "arp_spoofing":
         return f"arp.src.proto_ipv4=={src}"
     if rule == "ping_sweep":
@@ -96,6 +107,11 @@ class Config:
     beacon_min_connections: int = 6
     beacon_min_interval: float = 5.0  # por debajo de esto es una ráfaga normal, no una baliza
     beacon_max_jitter: float = 0.15  # desviación típica / media de los intervalos
+    brute_min_connections: int = 15  # conexiones nuevas a SSH, RDP, SMB... desde un equipo...
+    brute_window: float = 60.0  # ...en esta ventana (segundos)
+    dga_min_domains: int = 10  # dominios distintos que no existen, pedidos por un equipo
+    icmp_min_payload: int = 128  # bytes de datos en un ping (Windows manda 32 y Linux 56)
+    icmp_min_packets: int = 10
 
 
 def _max_distinct_in_window(events: list[tuple[float, object]], window: float) -> tuple[int, float, float]:
@@ -399,7 +415,261 @@ def detect_cleartext_credentials(packets: list[Packet], cfg: Config) -> list[Fin
     return list(seen.values())
 
 
-DETECTORS = [detect_scans, detect_arp_spoofing, detect_dns_tunnel, detect_beaconing, detect_cleartext_credentials]
+def _max_in_window(times: list[float], window: float) -> tuple[int, float, float]:
+    best, span, start = 0, (times[0], times[0]), 0
+    for end, t in enumerate(times):
+        while t - times[start] > window:
+            start += 1
+        if end - start + 1 > best:
+            best, span = end - start + 1, (times[start], t)
+    return best, *span
+
+
+# Servicios donde se entra con usuario y contraseña: muchas conexiones seguidas = probando claves.
+LOGIN_SERVICES = {
+    21: "FTP", 22: "SSH", 23: "Telnet", 110: "POP3", 143: "IMAP", 389: "LDAP", 445: "SMB",
+    1433: "SQL Server", 3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL", 5900: "VNC",
+    5985: "WinRM", 5986: "WinRM",
+}  # fmt: skip
+
+
+def detect_service_bruteforce(packets: list[Packet], cfg: Config) -> list[Finding]:
+    starts: dict[tuple, list[float]] = defaultdict(list)
+    seen: set[tuple] = set()
+    for p in packets:
+        if p.is_syn and p.dport in LOGIN_SERVICES:
+            conn = (p.src, p.sport, p.dst, p.dport)
+            if conn not in seen:  # los SYN reenviados son la misma conexión
+                seen.add(conn)
+                starts[(p.src, p.dst, p.dport)].append(p.ts)
+    findings = []
+    for (src, dst, port), times in starts.items():
+        count, start, end = _max_in_window(times, cfg.brute_window)
+        if count < cfg.brute_min_connections:
+            continue
+        service = LOGIN_SERVICES[port]
+        findings.append(
+            Finding(
+                Severity.MEDIUM,
+                "service_bruteforce",
+                f"Posible fuerza bruta contra {service} de {dst} desde {src}",
+                start,
+                end,
+                f"{count} conexiones nuevas al puerto {port} en {_duration(start, end)} ({len(times)} en total). "
+                "Una persona abre una o dos; tantas seguidas son un programa probando contraseñas "
+                "(hydra, ncrack, crackmapexec...)",
+                src,
+                dst,
+                "T1110 Brute Force",
+                port,
+            )
+        )
+    return findings
+
+
+# Puertos que usan por defecto herramientas de ataque y puertas traseras. Que haya datos en
+# ellos no prueba nada (cualquiera puede usar el 4444), pero merece un vistazo.
+MALWARE_PORTS = {
+    4444: "el que usa Metasploit por defecto para sus shells inversas y Meterpreter",
+    4445: "uno de los de Metasploit",
+    1337: "un puerto 'elite' típico de herramientas de ataque",
+    31337: "el de Back Orifice y otras puertas traseras",
+    12345: "el de NetBus",
+    6666: "IRC, que usan muchas botnets para recibir órdenes",
+    6667: "IRC, que usan muchas botnets para recibir órdenes",
+    6697: "IRC con TLS, que usan algunas botnets",
+}
+
+
+def detect_suspicious_ports(packets: list[Packet], cfg: Config) -> list[Finding]:
+    opened: dict[tuple, tuple[str, str, int]] = {}  # conexión -> (cliente, servidor, puerto)
+    sessions: dict[tuple, list] = {}  # (cliente, servidor, puerto) -> [primero, último, bytes]
+    for p in packets:
+        if p.proto != "TCP":
+            continue
+        if p.is_syn and p.dport in MALWARE_PORTS:
+            key = (p.src, p.dst, p.dport)
+            opened[(p.src, p.sport, p.dst, p.dport)] = key
+            opened[(p.dst, p.dport, p.src, p.sport)] = key
+        elif p.payload and (key := opened.get((p.src, p.sport, p.dst, p.dport))):
+            if key in sessions:
+                sessions[key][1] = p.ts
+                sessions[key][2] += len(p.payload)
+            else:
+                sessions[key] = [p.ts, p.ts, len(p.payload)]
+    return [
+        Finding(
+            Severity.MEDIUM,
+            "suspicious_port",
+            f"Sesión con datos en el puerto {port}: {client} -> {server}",
+            first,
+            last,
+            f"{size} bytes. El {port} es {MALWARE_PORTS[port]}. Puede ser legítimo, pero si {client} "
+            "es un equipo normal de la red, mira qué programa abrió esa conexión",
+            client,
+            server,
+            "T1571 Non-Standard Port",
+            port,
+        )
+        for (client, server, port), (first, last, size) in sessions.items()
+    ]
+
+
+def detect_dga(packets: list[Packet], cfg: Config) -> list[Finding]:
+    """Muchos dominios distintos que no existen (NXDOMAIN), pedidos por el mismo equipo.
+
+    Algunos malware no llevan escrita la dirección de su servidor: generan cada día cientos
+    de nombres al azar (un DGA) y prueban hasta dar con el que el atacante ha registrado.
+    Desde la red se ve como un montón de respuestas "ese dominio no existe".
+    """
+    failed: dict[str, dict[str, Packet]] = defaultdict(dict)  # equipo -> dominio -> primera respuesta
+    for p in packets:
+        if p.dns and p.dns.response and p.dns.rcode == 3 and p.dst:
+            failed[p.dst].setdefault(base_domain(p.dns.qname), p)
+    findings = []
+    for client, domains in failed.items():
+        if len(domains) < cfg.dga_min_domains:
+            continue
+        responses = sorted(domains.values(), key=lambda p: p.ts)
+        sample = ", ".join(sorted(domains)[:5])
+        findings.append(
+            Finding(
+                Severity.HIGH,
+                "dga",
+                f"{client} pide muchos dominios que no existen (posible DGA)",
+                responses[0].ts,
+                responses[-1].ts,
+                f"{len(domains)} dominios distintos sin respuesta, por ejemplo {sample}. Así buscan algunos "
+                "malware su servidor de control",
+                client,
+                None,
+                "T1568.002 Domain Generation Algorithms",
+            )
+        )
+    return findings
+
+
+def detect_rogue_dhcp(packets: list[Packet], cfg: Config) -> list[Finding]:
+    """Dos servidores DHCP repartiendo direcciones en la misma red.
+
+    Un DHCP falso da a los equipos que se conectan su propia IP como puerta de enlace o como
+    DNS, y así todo su tráfico pasa por él (o sus búsquedas de nombres).
+    """
+    servers: dict[str, dict] = {}
+    for p in packets:
+        if p.proto != "UDP" or p.sport != 67:
+            continue
+        reply = parse_dhcp_reply(p.payload)
+        if reply is None:
+            continue
+        server = reply.get("server") or p.src or "?"
+        info = servers.setdefault(server, {"first": p.ts, "last": p.ts, "mac": p.src_mac, **reply})
+        info["last"] = p.ts
+    if len(servers) < 2:
+        return []
+    ordered = sorted(servers.items(), key=lambda item: item[1]["first"])
+
+    def describe(ip: str, info: dict) -> str:
+        parts = [f"MAC {info['mac']}" if info.get("mac") else None]
+        parts.append(f"puerta de enlace {info['router']}" if info.get("router") else None)
+        parts.append(f"DNS {info['dns']}" if info.get("dns") else None)
+        return f"{ip} ({', '.join(x for x in parts if x)})"
+
+    return [
+        Finding(
+            Severity.HIGH,
+            "rogue_dhcp",
+            f"{len(servers)} servidores DHCP en la misma red: {', '.join(ip for ip, _ in ordered)}",
+            ordered[0][1]["first"],
+            max(info["last"] for _, info in ordered),
+            "; ".join(describe(ip, info) for ip, info in ordered)
+            + ". En una red normal solo hay uno: el que sobra puede estar desviando el tráfico",
+            None,
+            None,
+            "T1557.003 DHCP Spoofing",
+        )
+    ]
+
+
+DHCP_COOKIE = b"\x63\x82\x53\x63"
+
+
+def parse_dhcp_reply(payload: bytes) -> dict | None:
+    """Una oferta (2) o confirmación (5) de DHCP (RFC 2131 y 2132), o None si no lo es."""
+    if len(payload) < 240 or payload[0] != 2 or payload[236:240] != DHCP_COOKIE:
+        return None
+    options: dict[int, bytes] = {}
+    i = 240
+    while i < len(payload):
+        code = payload[i]
+        if code == 0:  # relleno
+            i += 1
+            continue
+        if code == 255 or i + 1 >= len(payload):
+            break
+        length = payload[i + 1]
+        options.setdefault(code, payload[i + 2 : i + 2 + length])
+        i += 2 + length
+
+    def ip(code: int) -> str | None:
+        value = options.get(code, b"")
+        return ".".join(map(str, value[:4])) if len(value) >= 4 else None
+
+    if options.get(53, b"\0")[:1] not in (b"\x02", b"\x05"):
+        return None
+    return {"server": ip(54), "router": ip(3), "dns": ip(6)}
+
+
+def detect_icmp_tunnel(packets: list[Packet], cfg: Config) -> list[Finding]:
+    """Pings grandes y cada uno distinto: datos escondidos en ICMP (ptunnel, icmpsh...).
+
+    Un ping normal lleva 32 o 56 bytes de relleno, siempre el mismo. Alguien que prueba la
+    MTU manda pings grandes, pero también iguales. Si son grandes y cambian, llevan datos.
+    """
+    flows: dict[tuple, list[Packet]] = defaultdict(list)
+    for p in packets:
+        echo = (p.proto, p.icmp_type) in (("ICMP", 8), ("ICMP", 0), ("ICMPv6", 128), ("ICMPv6", 129))
+        if echo and len(p.payload) >= cfg.icmp_min_payload:
+            # pregunta y respuesta van al mismo flujo, ordenado por IP
+            flows[tuple(sorted((p.src or "", p.dst or "")))].append(p)
+    findings = []
+    for (a, b), pkts in flows.items():
+        distinct = len({p.payload for p in pkts})
+        if len(pkts) < cfg.icmp_min_packets or distinct < len(pkts) // 2:
+            continue
+        src = Counter(p.src for p in pkts if p.icmp_type in (8, 128)).most_common(1)
+        client = src[0][0] if src else a
+        server = b if client == a else a
+        size = sum(len(p.payload) for p in pkts)
+        findings.append(
+            Finding(
+                Severity.HIGH,
+                "icmp_tunnel",
+                f"Posible túnel ICMP entre {client} y {server}",
+                pkts[0].ts,
+                pkts[-1].ts,
+                f"{len(pkts)} pings de más de {cfg.icmp_min_payload} bytes, {distinct} con contenido distinto; "
+                f"unos {size / 1024:.1f} KB dentro. Un ping normal lleva siempre el mismo relleno",
+                client,
+                server,
+                "T1095 Non-Application Layer Protocol",
+            )
+        )
+    return findings
+
+
+DETECTORS = [
+    detect_scans,
+    detect_arp_spoofing,
+    detect_dns_tunnel,
+    detect_beaconing,
+    detect_cleartext_credentials,
+    detect_service_bruteforce,
+    detect_suspicious_ports,
+    detect_dga,
+    detect_rogue_dhcp,
+    detect_icmp_tunnel,
+]
 
 
 def run_detectors(packets: list[Packet], cfg: Config | None = None) -> list[Finding]:

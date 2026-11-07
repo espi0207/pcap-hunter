@@ -74,6 +74,8 @@ class CredentialSniffer:
         self._smtp_plain: set[tuple] = set()  # "AUTH PLAIN" sin datos: llegan en la línea siguiente
 
     def feed(self, pkt: Packet) -> list[Credential]:
+        if pkt.proto == "UDP" and pkt.dport in (161, 162) and pkt.payload:
+            return _snmp(pkt.payload)
         if pkt.proto != "TCP" or not pkt.payload:
             return []
         payload = pkt.payload
@@ -129,6 +131,40 @@ def _smtp_plain(blob: str) -> list[Credential]:
     decoded = _b64(blob)
     parts = decoded.split("\0") if decoded else []
     return [Credential("SMTP AUTH PLAIN", parts[1], parts[2])] if len(parts) == 3 else []
+
+
+def _ber_length(data: bytes, pos: int) -> tuple[int, int]:
+    """Longitud BER (forma corta o larga) en `pos`: devuelve (longitud, dónde empieza el valor)."""
+    first = data[pos]
+    if first < 0x80:
+        return first, pos + 1
+    n = first & 0x7F
+    if not 1 <= n <= 2 or pos + 1 + n > len(data):
+        raise ValueError("longitud BER rara")
+    return int.from_bytes(data[pos + 1 : pos + 1 + n], "big"), pos + 1 + n
+
+
+def _snmp(payload: bytes) -> list[Credential]:
+    """SNMP v1 y v2c mandan la "comunidad" (que hace de contraseña) en claro en cada paquete.
+
+    El mensaje es BER: SEQUENCE { INTEGER versión, OCTET STRING comunidad, ... } (RFC 1157).
+    """
+    try:
+        if payload[0] != 0x30:
+            return []
+        _, pos = _ber_length(payload, 1)
+        if payload[pos : pos + 2] != b"\x02\x01" or payload[pos + 2] not in (0, 1):
+            return []  # v3 no lleva comunidad
+        version = "SNMPv1" if payload[pos + 2] == 0 else "SNMPv2c"
+        if payload[pos + 3] != 0x04:
+            return []
+        length, start = _ber_length(payload, pos + 4)
+        community = payload[start : start + length]
+        if len(community) != length or not community:
+            return []
+    except (IndexError, ValueError):
+        return []
+    return [Credential(version, None, community.decode("utf-8", errors="replace"), "comunidad")]
 
 
 def mask(secret: str) -> str:

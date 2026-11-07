@@ -289,8 +289,8 @@ class App:
     def about(self) -> None:
         messagebox.showinfo(
             "Acerca de pcap-hunter",
-            f"pcap-hunter {__version__}\n\nBusca escaneos de puertos, ARP spoofing, túneles DNS, beaconing y "
-            "contraseñas en claro en capturas de red.\n\nhttps://github.com/espi0207/pcap-hunter",
+            f"pcap-hunter {__version__}\n\nBusca escaneos de puertos, ARP spoofing, túneles DNS e ICMP, "
+            "beaconing, fuerza bruta, DGA, DHCP falso y contraseñas en claro en capturas de red.\n\nhttps://github.com/espi0207/pcap-hunter",
             parent=self.root,
         )
 
@@ -347,7 +347,18 @@ def self_check() -> int:
             root.after(100, check)
             return
         rules = {f.rule for f in app.analysis.findings} if app.analysis else set()
-        expected = {"port_scan", "network_sweep", "arp_spoofing", "dns_tunnel", "beaconing", "cleartext_credentials"}
+        expected = {
+            "port_scan",
+            "network_sweep",
+            "arp_spoofing",
+            "dns_tunnel",
+            "beaconing",
+            "cleartext_credentials",
+            "service_bruteforce",
+            "rogue_dhcp",
+            "suspicious_port",
+            "dga",
+        }
         outcome["code"] = 0 if expected <= rules and len(app.tree.get_children()) == len(app.analysis.findings) else 1
         root.destroy()
 

@@ -106,6 +106,32 @@ def dns_answer(ident: int, name: str, address: str, qtype: int = 1) -> bytes:
     return struct.pack("!HHHHHH", ident, 0x8180, 1, 1, 0, 0) + question + answer
 
 
+def dns_nxdomain(ident: int, name: str, qtype: int = 1) -> bytes:
+    """Respuesta "ese dominio no existe" (RCODE 3)."""
+    return struct.pack("!HHHHHH", ident, 0x8183, 1, 0, 0, 0) + dns_name(name) + struct.pack("!HH", qtype, 1)
+
+
+def dhcp_offer(xid: int, client_mac: str, offered: str, server: str, router: str, dns: str) -> bytes:
+    """Oferta DHCP (RFC 2131) con servidor, puerta de enlace y DNS."""
+    ip = ipaddress.IPv4Address
+    fixed = struct.pack("!BBBBIHH", 2, 1, 6, 0, xid, 0, 0) + bytes(4) + ip(offered).packed + ip(server).packed
+    fixed += bytes(4) + mac(client_mac) + bytes(10) + bytes(64) + bytes(128) + b"\x63\x82\x53\x63"
+    options = bytes([53, 1, 2, 54, 4]) + ip(server).packed + bytes([1, 4]) + ip("255.255.255.0").packed
+    options += bytes([3, 4]) + ip(router).packed + bytes([6, 4]) + ip(dns).packed + bytes([51, 4, 0, 1, 81, 128, 255])
+    return fixed + options
+
+
+def snmp_get(community: str, version: int = 1) -> bytes:
+    """GetRequest de SNMP v1 (0) o v2c (1) pidiendo sysDescr."""
+    oid = bytes([0x06, 0x08, 0x2B, 6, 1, 2, 1, 1, 1, 0])
+    varbind = bytes([0x30, len(oid) + 2]) + oid + b"\x05\x00"
+    varbinds = bytes([0x30, len(varbind)]) + varbind
+    pdu_body = b"\x02\x01\x01\x02\x01\x00\x02\x01\x00" + varbinds
+    pdu = bytes([0xA0, len(pdu_body)]) + pdu_body
+    body = bytes([0x02, 0x01, version, 0x04, len(community)]) + community.encode() + pdu
+    return bytes([0x30, len(body)]) + body
+
+
 class Lan:
     """Una red de mentira: sabe la MAC de cada IP y monta tramas Ethernet completas."""
 
