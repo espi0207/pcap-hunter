@@ -16,6 +16,10 @@ EXPECTED = {
     "dns_tunnel",
     "network_sweep",
     "port_scan",
+    "service_bruteforce",
+    "rogue_dhcp",
+    "suspicious_port",
+    "dga",
 }
 
 
@@ -87,5 +91,5 @@ def test_el_ejemplo_se_puede_regenerar_igual(tmp_path):
     from pcaphunter.sample import write_sample
 
     out = tmp_path / "oficina.pcap"
-    assert write_sample(out) == 1678
+    assert write_sample(out) == 1840
     assert out.read_bytes() == SAMPLE.read_bytes()

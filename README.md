@@ -64,7 +64,7 @@ pcaphunter samples/oficina.pcap
 ```text
 pcap-hunter: samples/oficina.pcap
 2026-09-25 10:00:01 (hora local), 39.8 minutos de tráfico
-1678 paquetes (321.1 KB): TCP 1252, UDP 374, ARP 52
+1840 paquetes (332.4 KB): TCP 1383, UDP 405, ARP 52
 
 [ALTA]    Conexiones periódicas de 192.168.1.23 a 203.0.113.50:443
           10:00:45 -> 10:38:44  (T1071.001 Web Protocols)
@@ -92,7 +92,10 @@ La historia completa de esa captura: el equipo `.66` escanea el servidor y la re
 buscando SMB, se hace pasar por el router con ARP spoofing, y mientras tanto el `.23`
 está infectado, se comunica con su servidor de control cada dos minutos y acaba sacando
 un archivo por DNS. Hay además tres contraseñas que viajan en claro (FTP, una intranet
-con autenticación Basic y un formulario). El script que la genera está en
+con autenticación Basic y un formulario) y una comunidad SNMP. Después el `.66` prueba
+contraseñas contra el SSH del servidor y monta un DHCP falso que se pone a sí mismo de
+puerta de enlace, y el `.23` abre una shell inversa al puerto 4444 y busca su servidor
+de control con dominios al azar (DGA). El script que la genera está en
 `samples/generate_sample.py`.
 
 Cada hallazgo trae un filtro de Wireshark (`Wireshark: ip.addr==… && tcp.flags.syn==1`):
@@ -121,7 +124,12 @@ permiso: capturar el tráfico de otros sin autorización es delito.
 | ARP spoofing | Una IP que pasa a responder desde otra MAC. Si esa MAC ya era de otro equipo de la red, alguien se está haciendo pasar por esa IP | T1557.002 |
 | Túnel DNS | 20 subdominios distintos o más bajo un mismo dominio, largos o con pinta aleatoria (entropía alta). Así funcionan dnscat2 o iodine | T1071.004 |
 | Beaconing | 6 conexiones o más al mismo destino a intervalos casi exactos. Se mide la dispersión de los intervalos, porque el malware suele añadir algo de variación para disimular | T1071 |
-| Credenciales en claro | HTTP Basic y Bearer, formularios de login por HTTP, FTP, POP3, IMAP y SMTP (AUTH PLAIN y AUTH LOGIN). Las contraseñas no se imprimen enteras | T1040 |
+| Credenciales en claro | HTTP Basic y Bearer, formularios de login por HTTP, FTP, POP3, IMAP, SMTP (AUTH PLAIN y AUTH LOGIN) y la comunidad de SNMP v1/v2c. Las contraseñas no se imprimen enteras | T1040 |
+| Fuerza bruta a un servicio | 15 conexiones nuevas o más en un minuto de un equipo al SSH, RDP, SMB, FTP, Telnet, MySQL, VNC, WinRM... de otro | T1110 |
+| Puerto de malware | Una sesión con datos en el 4444 (Metasploit), 31337, 12345 o los de IRC. Solo si hay datos: tocar la puerta (un escaneo) no cuenta | T1571 |
+| DGA | Un equipo pide 10 dominios distintos o más que no existen. Así buscan algunos malware su servidor de control, probando nombres al azar | T1568.002 |
+| DHCP falso | Dos servidores DHCP o más dando direcciones en la misma red. Dice la puerta de enlace y el DNS que reparte cada uno | T1557.003 |
+| Túnel ICMP | 10 pings o más de más de 128 bytes y cada uno distinto (un ping normal lleva siempre el mismo relleno). Así funcionan ptunnel o icmpsh | T1095 |
 
 Los umbrales están en `Config`, en `pcaphunter/detectors.py`.
 
@@ -156,10 +164,11 @@ Algunos detalles:
 
 ### Cómo sé que decodifica bien
 
-Aparte de las pruebas, lo comparé con scapy: los 1678 paquetes de la captura de ejemplo
+Aparte de las pruebas, lo comparé con scapy: los paquetes de la captura de ejemplo
 se decodifican igual (IPs, puertos, flags, nombres DNS, ARP) y todos los checksums que
 genera `craft.py` son correctos. También leí un pcapng escrito por scapy con VLAN, IPv6
-y DNS. Y hay una prueba que corrompe la captura de ejemplo al azar 150 veces para
+y DNS. Con los ataques nuevos (noviembre de 2026) volví a abrirla con scapy: lee los
+1840 paquetes y entiende igual las ofertas DHCP, la consulta SNMP y los NXDOMAIN. Y hay una prueba que corrompe la captura de ejemplo al azar 150 veces para
 comprobar que nunca se cae.
 
 ## Limitaciones
