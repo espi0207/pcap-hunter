@@ -120,16 +120,17 @@ permiso: capturar el tráfico de otros sin autorización es delito.
 | Regla | Qué mira | MITRE ATT&CK |
 |---|---|---|
 | Escaneo de puertos | Un equipo manda SYN a 15 puertos o más de otro en un minuto. Dice qué puertos respondieron abiertos y si el escaneo completa las conexiones (`nmap -sT`) o las corta con RST (`nmap -sS`) | T1046 |
-| Barrido de la red | El mismo puerto probado en 15 equipos o más, o pings a 15 equipos | T1046, T1018 |
+| Escaneo sigiloso | Lo mismo, pero con paquetes sin SYN, ACK ni RST, que ninguna conexión normal manda: NULL, FIN y Xmas (`nmap -sN`, `-sF`, `-sX`). Dice qué puertos no contestaron (abiertos o filtrados) | T1046 |
+| Barrido de la red | El mismo puerto probado en 15 equipos o más, o pings a 15 equipos. Si el equipo llega a hablar con la mayoría, no es un barrido: es alguien navegando | T1046, T1018 |
 | ARP spoofing | Una IP que pasa a responder desde otra MAC. Si esa MAC ya era de otro equipo de la red, alguien se está haciendo pasar por esa IP | T1557.002 |
-| Túnel DNS | 20 subdominios distintos o más bajo un mismo dominio, largos o con pinta aleatoria (entropía alta). Así funcionan dnscat2 o iodine | T1071.004 |
-| Beaconing | 6 conexiones o más al mismo destino a intervalos casi exactos. Se mide la dispersión de los intervalos, porque el malware suele añadir algo de variación para disimular | T1071 |
-| Credenciales en claro | HTTP Basic y Bearer, formularios de login por HTTP, FTP, POP3, IMAP, SMTP (AUTH PLAIN y AUTH LOGIN) y la comunidad de SNMP v1/v2c. Las contraseñas no se imprimen enteras | T1040 |
+| Túnel DNS | 20 subdominios distintos o más bajo un mismo dominio, largos o codificados (entropía alta y casi sin vocales). Así funcionan dnscat2 o iodine. Las redes de reparto conocidas (CloudFront, googlevideo...) no cuentan | T1071.004 |
+| Beaconing | 6 conexiones o más al mismo destino a intervalos casi exactos. Se mide la dispersión de los intervalos, porque el malware suele añadir algo de variación para disimular, y se apartan los parones largos (un portátil suspendido) | T1071 |
+| Credenciales en claro | HTTP Basic y Bearer (también la del proxy), formularios de login por HTTP (clásicos y en JSON), contraseñas en la propia dirección, FTP, POP3, IMAP, SMTP (AUTH PLAIN y AUTH LOGIN) y la comunidad de SNMP v1/v2c. Las contraseñas no se imprimen enteras | T1040 |
 | Fuerza bruta a un servicio | 15 conexiones nuevas o más en un minuto de un equipo al SSH, RDP, SMB, FTP, Telnet, MySQL, VNC, WinRM... de otro | T1110 |
 | Puerto de malware | Una sesión con datos en el 4444 (Metasploit), 31337, 12345 o los de IRC. Solo si hay datos: tocar la puerta (un escaneo) no cuenta | T1571 |
-| DGA | Un equipo pide 10 dominios distintos o más que no existen. Así buscan algunos malware su servidor de control, probando nombres al azar | T1568.002 |
+| DGA | Un equipo pide 10 dominios distintos o más que no existen. Así buscan algunos malware su servidor de control, probando nombres al azar. Si los nombres se pueden leer (un bloqueador de anuncios) sale con prioridad baja, y los de la red local no cuentan | T1568.002 |
 | DHCP falso | Dos servidores DHCP o más dando direcciones en la misma red. Dice la puerta de enlace y el DNS que reparte cada uno | T1557.003 |
-| Túnel ICMP | 10 pings o más de más de 128 bytes y cada uno distinto (un ping normal lleva siempre el mismo relleno). Así funcionan ptunnel o icmpsh | T1095 |
+| Túnel ICMP | 10 pings o más de más de 128 bytes y cada uno distinto (un ping normal lleva siempre el mismo relleno, quitando la hora que Linux y macOS ponen al principio). Así funcionan ptunnel o icmpsh | T1095 |
 
 Los umbrales están en `Config`, en `pcaphunter/detectors.py`.
 
