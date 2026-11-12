@@ -117,7 +117,14 @@ def _read_pcapng(fh) -> Iterator[RawPacket]:
             interfaces = []  # cada sección tiene sus propias interfaces
             continue
         block_type, total = struct.unpack(endian + "II", head)
-        if total < 12 or total % 4 or total > MAX_PACKET + 64:
+        if total < 12 or total % 4:
+            raise CaptureError(f"bloque pcapng con longitud imposible ({total})")
+        if block_type not in MIN_BODY:
+            # Estadísticas, nombres resueltos, claves TLS que guarda Wireshark... no hacen falta y
+            # pueden ocupar mucho: se saltan sin leerlos.
+            fh.seek(total - 8, 1)
+            continue
+        if total > MAX_PACKET + 64:
             raise CaptureError(f"bloque pcapng con longitud imposible ({total})")
         body = fh.read(total - 8)
         if len(body) < total - 8:
@@ -141,7 +148,6 @@ def _read_pcapng(fh) -> Iterator[RawPacket]:
             linktype, _, snaplen = interfaces[0]
             cap_len = min(orig_len, snaplen) if snaplen else orig_len
             yield RawPacket(0.0, linktype, body[4 : 4 + cap_len], orig_len)
-        # el resto de bloques (estadísticas, nombres resueltos, comentarios) no hacen falta
 
 
 def write_pcap(path: Path | str, packets: list[tuple[float, bytes]], linktype: int = 1) -> None:

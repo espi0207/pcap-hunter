@@ -89,6 +89,8 @@ def wireshark_filter(rule: str, src: str | None, dst: str | None, port: int | No
     if rule == "dns_tunnel" and dst:
         domain = dst.replace("\\", "\\\\").replace('"', '\\"')
         return f'{_ip("src", src)} && dns.qry.name contains "{domain}"'
+    if dst and rule == "stealth_scan":
+        return f"{_ip('src', src)} && {_ip('dst', dst)} && tcp.flags.syn==0 && tcp.flags.ack==0 && tcp.flags.reset==0"
     if dst and rule in ("port_scan", "beaconing"):
         return f"{_ip('addr', src)} && {_ip('addr', dst)} && tcp.flags.syn==1"
     if dst:
@@ -103,10 +105,13 @@ class Config:
     sweep_hosts: int = 15  # equipos distintos probados en el mismo puerto
     dns_min_names: int = 20  # subdominios distintos bajo un mismo dominio
     dns_min_length: float = 25.0  # longitud media de la parte del subdominio...
-    dns_min_entropy: float = 3.8  # ...o entropía (bits por carácter)
+    dns_min_entropy: float = 3.8  # ...o entropía (bits por carácter)...
+    dns_min_encoded_length: float = 10.0  # ...en nombres de al menos esta longitud media...
+    dns_max_vowels: float = 0.25  # ...y casi sin vocales: datos codificados, no palabras
     beacon_min_connections: int = 6
     beacon_min_interval: float = 5.0  # por debajo de esto es una ráfaga normal, no una baliza
     beacon_max_jitter: float = 0.15  # desviación típica / media de los intervalos
+    beacon_max_gaps: float = 0.2  # parte de los intervalos que pueden ser parones (equipo suspendido)
     brute_min_connections: int = 15  # conexiones nuevas a SSH, RDP, SMB... desde un equipo...
     brute_window: float = 60.0  # ...en esta ventana (segundos)
     dga_min_domains: int = 10  # dominios distintos que no existen, pedidos por un equipo
@@ -156,6 +161,8 @@ def detect_scans(packets: list[Packet], cfg: Config) -> list[Finding]:
         for p in packets
         if p.proto == "TCP" and p.flags & ACK and not p.flags & (SYN | RST)  # un FIN suelto no completa nada
     }
+    # Conexiones en las que el cliente llegó a mandar datos: una conversación de verdad.
+    talked = {(p.src, p.sport, p.dst, p.dport) for p in packets if p.proto == "TCP" and p.payload}
     findings = []
 
     by_pair: dict[tuple, list] = defaultdict(list)
@@ -199,6 +206,11 @@ def detect_scans(packets: list[Packet], cfg: Config) -> list[Finding]:
             continue
         hosts = {p.dst for _, p in events}
         answered = {p.dst for _, p in events if (p.src, p.sport, p.dst, p.dport) in synacks}
+        # Quien barre una red encuentra casi todo cerrado y, si algo contesta, corta. Quien navega
+        # habla con todos: abrir una web moderna son decenas de servidores distintos por el 443.
+        conversed = {p.dst for _, p in events if (p.src, p.sport, p.dst, p.dport) in synacks & talked}
+        if len(conversed) * 2 >= len(hosts):
+            continue
         findings.append(
             Finding(
                 Severity.MEDIUM,
@@ -212,6 +224,8 @@ def detect_scans(packets: list[Packet], cfg: Config) -> list[Finding]:
                 "T1046 Network Service Discovery",
             )
         )
+
+    findings += _stealth_scans(packets, cfg)
 
     # echo request: tipo 8 en ICMP y 128 en ICMPv6
     pings = [(p.ts, p.dst, p.src) for p in packets if (p.proto, p.icmp_type) in (("ICMP", 8), ("ICMPv6", 128))]
@@ -234,6 +248,49 @@ def detect_scans(packets: list[Packet], cfg: Config) -> list[Finding]:
                     "T1018 Remote System Discovery",
                 )
             )
+    return findings
+
+
+STEALTH_KINDS = {0: "NULL (sin ningún flag, nmap -sN)", 0x01: "FIN (nmap -sF)", 0x29: "Xmas (FIN, PSH y URG, nmap -sX)"}
+
+
+def _stealth_scans(packets: list[Packet], cfg: Config) -> list[Finding]:
+    """Escaneos que no usan SYN: paquetes sueltos sin SYN, ACK ni RST a muchos puertos.
+
+    Ninguna conexión normal empieza así. Un puerto cerrado contesta con RST y uno abierto se
+    calla, y con eso el que escanea se entera sin llegar a abrir ninguna conexión.
+    """
+    probes: dict[tuple, list] = defaultdict(list)
+    for p in packets:
+        if p.proto == "TCP" and not p.flags & (SYN | ACK | RST) and not p.payload:
+            probes[(p.src, p.dst)].append((p.ts, p))
+    resets = {(p.dst, p.dport, p.src, p.sport) for p in packets if p.proto == "TCP" and p.flags & RST}
+    findings = []
+    for (src, dst), events in probes.items():
+        count, start, end = _max_distinct_in_window([(ts, p.dport) for ts, p in events], cfg.scan_window)
+        if count < cfg.scan_ports:
+            continue
+        flags = Counter(p.flags & 0x3F for _, p in events).most_common(1)[0][0]
+        kind = STEALTH_KINDS.get(flags, "con flags que no usa ninguna conexión normal")
+        silent = {p.dport for _, p in events} - {
+            p.dport for _, p in events if (p.src, p.sport, p.dst, p.dport) in resets
+        }
+        result = (
+            f"sin respuesta (abiertos o filtrados): {_ports_text(silent)}" if silent else "todos contestaron cerrado"
+        )
+        findings.append(
+            Finding(
+                Severity.MEDIUM,
+                "stealth_scan",
+                f"Escaneo sigiloso de puertos de {src} a {dst}",
+                start,
+                end,
+                f"{count} puertos distintos en {_duration(start, end)} con paquetes {kind}; {result}",
+                src,
+                dst,
+                "T1046 Network Service Discovery",
+            )
+        )
     return findings
 
 
@@ -296,6 +353,24 @@ def base_domain(name: str) -> str:
     return ".".join(labels[-2:])
 
 
+# Redes de reparto de contenido y nubes que dan a cada servidor un nombre con pinta aleatoria.
+# Por ellas no se puede montar un túnel: haría falta mandar en el servidor DNS de esa zona.
+CDN_ZONES = {
+    "googlevideo.com", "gvt1.com", "1e100.net", "cloudfront.net", "amazonaws.com", "akamaihd.net",
+    "akamaiedge.net", "akamai.net", "edgekey.net", "edgesuite.net", "fbcdn.net", "cdninstagram.com",
+    "windows.net", "azureedge.net", "msedge.net", "nflxvideo.net", "llnwd.net", "fastly.net",
+    "apple-dns.net", "aaplimg.com", "office.com", "microsoft.com", "googleusercontent.com",
+}  # fmt: skip
+VOWELS = set("aeiou")
+
+
+def _vowel_share(text: str) -> float:
+    """Parte de las letras y cifras que son vocales. En palabras ronda el 35-40 %; en datos
+    codificados (hexadecimal, base32, base64) no pasa del 16 %."""
+    chars = [c for c in text if c.isalnum()]
+    return sum(c in VOWELS for c in chars) / len(chars) if chars else 1.0
+
+
 def detect_dns_tunnel(packets: list[Packet], cfg: Config) -> list[Finding]:
     """Muchísimos subdominios distintos, largos y con pinta aleatoria bajo un mismo dominio.
 
@@ -311,11 +386,19 @@ def detect_dns_tunnel(packets: list[Packet], cfg: Config) -> list[Finding]:
     findings = []
     for (src, domain), pkts in queries.items():
         subs = {p.dns.qname[: -len(domain) - 1] for p in pkts}
-        if len(subs) < cfg.dns_min_names:
+        if len(subs) < cfg.dns_min_names or domain in CDN_ZONES:
             continue
         avg_len = statistics.mean(len(s) for s in subs)
-        ent = _entropy("".join(s.replace(".", "") for s in subs))
-        if avg_len < cfg.dns_min_length and ent < cfg.dns_min_entropy:
+        joined = "".join(s.replace(".", "") for s in subs)
+        ent = _entropy(joined)
+        # Nombres largos, o más cortos pero codificados. La entropía sola no vale: veinte nombres
+        # normales (www, mail, drive...) juntos ya tienen tanta como un texto en hexadecimal.
+        encoded_looking = (
+            avg_len >= cfg.dns_min_encoded_length
+            and ent >= cfg.dns_min_entropy
+            and _vowel_share(joined) < cfg.dns_max_vowels
+        )
+        if avg_len < cfg.dns_min_length and not encoded_looking:
             continue
         types = Counter(p.dns.qtype for p in pkts)
         encoded = sum(len(s) for s in subs)
@@ -367,10 +450,17 @@ def detect_beaconing(packets: list[Packet], cfg: Config) -> list[Finding]:
         if len(times) < cfg.beacon_min_connections:
             continue
         intervals = [b - a for a, b in pairwise(times)]
-        mean = statistics.mean(intervals)
+        # Un equipo que se suspende o pierde la red deja huecos largos entre llamadas; se apartan
+        # (si son pocos) para que no tapen el ritmo de todas las demás.
+        median = statistics.median(intervals)
+        regular = [x for x in intervals if x <= 3 * median]
+        gaps = len(intervals) - len(regular)
+        if len(regular) + 1 < cfg.beacon_min_connections or gaps > len(intervals) * cfg.beacon_max_gaps:
+            continue
+        mean = statistics.mean(regular)
         if mean < cfg.beacon_min_interval:
             continue
-        jitter = statistics.pstdev(intervals) / mean
+        jitter = statistics.pstdev(regular) / mean
         if jitter > cfg.beacon_max_jitter:
             continue
         web = port in (80, 443, 8080, 8443)
@@ -381,7 +471,9 @@ def detect_beaconing(packets: list[Packet], cfg: Config) -> list[Finding]:
                 f"Conexiones periódicas de {src} a {dst}:{port}",
                 times[0],
                 times[-1],
-                f"{len(times)} conexiones, una cada {mean:.0f} s (variación del {jitter:.0%}): "
+                f"{len(times)} conexiones, una cada {mean:.0f} s (variación del {jitter:.0%}"
+                + (f", con {gaps} parón(es) largo(s)" if gaps else "")
+                + "): "
                 "parece un programa que se comunica solo con un servidor de control",
                 src,
                 dst,
@@ -515,6 +607,30 @@ def detect_suspicious_ports(packets: list[Packet], cfg: Config) -> list[Finding]
     ]
 
 
+# Zonas que solo existen dentro de una red: que el DNS no las conozca no dice nada.
+LOCAL_ZONES = ("local", "lan", "home", "internal", "intranet", "corp", "localdomain", "arpa", "test", "invalid",
+               "workgroup", "localhost")  # fmt: skip
+
+
+def _local_name(name: str) -> bool:
+    labels = name.rstrip(".").split(".")
+    return len(labels) < 2 or labels[-1] in LOCAL_ZONES
+
+
+def _looks_generated(domain: str) -> bool:
+    """Un nombre que nadie escribiría: casi sin vocales o con cuatro consonantes seguidas."""
+    label = domain.split(".")[0]
+    letters = [c for c in label if c.isalpha()]
+    if len(label) < 6 or not letters:
+        return False
+    run = longest = 0
+    for c in label:
+        run = run + 1 if c.isalpha() and c not in "aeiouy" else 0
+        longest = max(longest, run)
+    digits = sum(c.isdigit() for c in label)
+    return longest >= 4 or _vowel_share(label) < 0.2 or digits * 3 >= len(label)
+
+
 def detect_dga(packets: list[Packet], cfg: Config) -> list[Finding]:
     """Muchos dominios distintos que no existen (NXDOMAIN), pedidos por el mismo equipo.
 
@@ -524,23 +640,32 @@ def detect_dga(packets: list[Packet], cfg: Config) -> list[Finding]:
     """
     failed: dict[str, dict[str, Packet]] = defaultdict(dict)  # equipo -> dominio -> primera respuesta
     for p in packets:
-        if p.dns and p.dns.response and p.dns.rcode == 3 and p.dst:
+        if p.dns and p.dns.response and p.dns.rcode == 3 and p.dst and not _local_name(p.dns.qname):
             failed[p.dst].setdefault(base_domain(p.dns.qname), p)
     findings = []
     for client, domains in failed.items():
         if len(domains) < cfg.dga_min_domains:
             continue
         responses = sorted(domains.values(), key=lambda p: p.ts)
-        sample = ", ".join(sorted(domains)[:5])
+        generated = sorted(d for d in domains if _looks_generated(d))
+        if len(generated) * 2 >= len(domains):
+            severity, title = Severity.HIGH, f"{client} pide muchos dominios que no existen (posible DGA)"
+            sample = ", ".join(generated[:5])
+            why = "Son nombres sin sentido: así buscan algunos malware su servidor de control"
+        else:
+            # Nombres que se pueden leer: lo normal es un bloqueador de anuncios (Pi-hole, AdGuard)
+            # que contesta "no existe", o direcciones mal escritas.
+            severity, title = Severity.LOW, f"{client} pide muchos dominios que no existen"
+            sample = ", ".join(sorted(domains)[:5])
+            why = "Se pueden leer, así que parece un bloqueador de anuncios o nombres mal escritos, no un malware"
         findings.append(
             Finding(
-                Severity.HIGH,
+                severity,
                 "dga",
-                f"{client} pide muchos dominios que no existen (posible DGA)",
+                title,
                 responses[0].ts,
                 responses[-1].ts,
-                f"{len(domains)} dominios distintos sin respuesta, por ejemplo {sample}. Así buscan algunos "
-                "malware su servidor de control",
+                f"{len(domains)} dominios distintos sin respuesta, por ejemplo {sample}. {why}",
                 client,
                 None,
                 "T1568.002 Domain Generation Algorithms",
@@ -620,6 +745,9 @@ def parse_dhcp_reply(payload: bytes) -> dict | None:
     return {"server": ip(54), "router": ip(3), "dns": ip(6)}
 
 
+PING_TIMESTAMP = 16
+
+
 def detect_icmp_tunnel(packets: list[Packet], cfg: Config) -> list[Finding]:
     """Pings grandes y cada uno distinto: datos escondidos en ICMP (ptunnel, icmpsh...).
 
@@ -634,7 +762,9 @@ def detect_icmp_tunnel(packets: list[Packet], cfg: Config) -> list[Finding]:
             flows[tuple(sorted((p.src or "", p.dst or "")))].append(p)
     findings = []
     for (a, b), pkts in flows.items():
-        distinct = len({p.payload for p in pkts})
+        # ping en Linux y macOS mete la hora en los 16 primeros bytes: cada ping es distinto ahí
+        # aunque el resto sea el relleno de siempre. Lo que cuenta es lo que va detrás.
+        distinct = len({p.payload[PING_TIMESTAMP:] for p in pkts})
         if len(pkts) < cfg.icmp_min_packets or distinct < len(pkts) // 2:
             continue
         src = Counter(p.src for p in pkts if p.icmp_type in (8, 128)).most_common(1)

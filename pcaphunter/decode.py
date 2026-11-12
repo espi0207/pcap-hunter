@@ -143,13 +143,15 @@ def _network(pkt: Packet, ethertype: int, data: bytes) -> None:
         _need(data, 20, "IPv4")
         ihl = (data[0] & 0x0F) * 4
         total = struct.unpack("!H", data[2:4])[0]
-        if ihl < 20 or total < ihl:
+        # total == 0: captura hecha en el propio equipo con TSO (la tarjeta parte el paquete
+        # después y rellena la longitud); el paquete llega hasta el final de lo capturado.
+        if ihl < 20 or (total and total < ihl):
             raise MalformedPacket("cabecera IPv4 incoherente")
         frag = struct.unpack("!H", data[6:8])[0] & 0x1FFF
         pkt.ttl, proto = data[8], data[9]
         pkt.src, pkt.dst = str(ipaddress.IPv4Address(data[12:16])), str(ipaddress.IPv4Address(data[16:20]))
         # Si el paquete viene con relleno de Ethernet, total dice dónde acaba de verdad.
-        body = data[ihl:total] if total <= len(data) else data[ihl:]
+        body = data[ihl:total] if 0 < total <= len(data) else data[ihl:]
         if frag == 0:  # los fragmentos que no son el primero no llevan cabecera de transporte
             _transport(pkt, proto, body)
         else:
@@ -158,7 +160,7 @@ def _network(pkt: Packet, ethertype: int, data: bytes) -> None:
         _need(data, 40, "IPv6")
         payload_len, next_header, pkt.ttl = struct.unpack("!HBB", data[4:8])
         pkt.src, pkt.dst = str(ipaddress.IPv6Address(data[8:24])), str(ipaddress.IPv6Address(data[24:40]))
-        body = data[40 : 40 + payload_len]
+        body = data[40 : 40 + payload_len] if payload_len else data[40:]  # 0: TSO o jumbograma
         hops = 0
         while next_header in IPV6_EXTENSIONS and hops < 8:
             _need(body, 8, "extensión IPv6")

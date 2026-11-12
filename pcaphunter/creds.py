@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import re
 from dataclasses import dataclass
 from urllib.parse import parse_qs
@@ -38,6 +39,27 @@ def _b64(text: str) -> str | None:
         return None
 
 
+def _field(form: dict[str, str], names: tuple[str, ...], extra: tuple[str, ...] = ()) -> str | None:
+    """El valor del campo que se llama como alguno de `names`, o que acaba así: muchas webs
+    les ponen algo delante (user_password, j_password, login_email...)."""
+    for name in names + extra:
+        if form.get(name):
+            return form[name]
+    for key, value in form.items():
+        # Los nombres cortos (pass, user...) solo valen detrás de un separador: "bypass" no es una clave.
+        if value and any(key.endswith(n) and (len(n) > 5 or not key[-len(n) - 1].isalnum()) for n in names):
+            return value
+    return None
+
+
+def _login(form: dict, protocol: str) -> list[Credential]:
+    form = {str(k).lower(): v for k, v in form.items() if isinstance(v, str)}
+    password = _field(form, PASSWORD_FIELDS)
+    if not password:
+        return []
+    return [Credential(protocol, _field(form, USER_FIELDS, ("log",)), password)]
+
+
 def _http(payload: bytes) -> list[Credential]:
     head, _, body = payload.partition(b"\r\n\r\n")
     lines = head.decode("latin-1").split("\r\n")
@@ -47,19 +69,31 @@ def _http(payload: bytes) -> list[Credential]:
         if sep:
             headers[name.strip().lower()] = value.strip()
     found = []
-    auth = headers.get("authorization", "")
-    scheme, _, value = auth.partition(" ")
-    if scheme.lower() == "basic" and (decoded := _b64(value)) and ":" in decoded:
-        user, _, password = decoded.partition(":")
-        found.append(Credential("HTTP Basic", user, password))
-    elif scheme.lower() == "bearer" and value:
-        found.append(Credential("HTTP Bearer", None, value, kind="token"))
-    if lines[0].startswith("POST ") and "x-www-form-urlencoded" in headers.get("content-type", ""):
-        form = {k.lower(): v[0] for k, v in parse_qs(body.decode("utf-8", errors="replace")).items()}
-        password = next((form[f] for f in PASSWORD_FIELDS if f in form), None)
-        if password:
-            user = next((form[f] for f in USER_FIELDS if f in form), None)
-            found.append(Credential("formulario HTTP", user, password))
+    # La del proxy va en su propia cabecera y se manda en cada petición, también en claro.
+    for header, where in (("authorization", "HTTP"), ("proxy-authorization", "proxy HTTP")):
+        scheme, _, value = headers.get(header, "").partition(" ")
+        if scheme.lower() == "basic" and (decoded := _b64(value)) and ":" in decoded:
+            user, _, password = decoded.partition(":")
+            found.append(Credential(f"{where} Basic", user, password))
+        elif scheme.lower() == "bearer" and value:
+            found.append(Credential(f"{where} Bearer", None, value, kind="token"))
+    text = body.decode("utf-8", errors="replace")
+    content_type = headers.get("content-type", "").lower()
+    if lines[0].startswith(("POST ", "PUT ", "PATCH ")):
+        if "x-www-form-urlencoded" in content_type:
+            found += _login({k: v[0] for k, v in parse_qs(text).items()}, "formulario HTTP")
+        elif "json" in content_type:  # las webs de ahora mandan el login como JSON
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = None
+            if isinstance(data, dict):
+                found += _login(data, "formulario HTTP (JSON)")
+    # Contraseña en la propia dirección (?user=admin&password=...): cámaras, routers y APIs viejas.
+    target = lines[0].split(" ")[1] if lines[0].count(" ") >= 1 else ""
+    if "?" in target:
+        query = parse_qs(target.partition("?")[2].partition("#")[0])
+        found += _login({k: v[0] for k, v in query.items()}, "dirección HTTP")
     return found
 
 
